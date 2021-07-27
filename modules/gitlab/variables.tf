@@ -1,5 +1,5 @@
 /**
- * Copyright 2018 Google LLC
+ * Copyright 2018-2021 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,16 @@ variable "project_id" {
   description = "GCP Project to deploy resources"
 }
 
+variable "network" {
+  type        = string
+  description = "Network"
+}
+
+variable "subnetwork" {
+  type        = string
+  description = "Subnetwork"
+}
+
 variable "domain" {
   description = "Domain for hosting gitlab functionality (ie mydomain.com would access gitlab at `gitlab.mydomain.com` and the registry at `registry.mydomain.com`)"
   default     = ""
@@ -25,55 +35,6 @@ variable "domain" {
 
 variable "certmanager_email" {
   description = "Email used to retrieve SSL certificates from [Let's Encrypt](https://letsencrypt.org)"
-}
-
-variable "gke_release_channel" {
-  description = "Kubernetes releases updates often, to deliver security updates, fix known issues, and introduce new features. [Release channels](https://cloud.google.com/kubernetes-engine/docs/concepts/release-channels) offer customers the ability to balance between stability and the feature set of the version deployed in the cluster."
-  default     = "REGULAR"
-}
-
-variable "gke_machine_type" {
-  description = "[Machine type](https://cloud.google.com/compute/docs/machine-types) used for the node-pool"
-  default     = "n1-standard-4"
-}
-
-variable "gke_preemptible_nodes" {
-  description = "[Preemptible VMs](https://cloud.google.com/compute/docs/instances/preemptible) are instances that you can create and run at a much lower price than normal instances. However, Compute Engine might stop (preempt) these instances if it requires access to those resources for other tasks. They're suitable for a GKE development deployment."
-  default     = false
-}
-
-variable "gke_min_node_count" {
-  description = "Mininum GKE nodes per availability zone"
-  default     = 1
-}
-
-variable "gke_private" {
-  type        = bool
-  default     = false
-  description = "Create a private GKE cluster"
-}
-
-variable "gke_workload_identity" {
-  type        = bool
-  default     = true
-  description = "Turn on Workload Identity in GKE"
-}
-
-variable "gke_autoscale_min" {
-  type        = number
-  default     = 1
-  description = "Minimum number of nodes when using GKE autoscaling"
-}
-
-variable "gke_autoscale_max" {
-  type        = number
-  default     = 0
-  description = "Maximum number of nodes when using GKE autoscaling (set to zero for no autoscaling)"
-}
-
-variable "gke_max_node_count" {
-  description = "Maximum GKE nodes per availability zone"
-  default     = 2
 }
 
 variable "gitlab_db_name" {
@@ -161,3 +122,7 @@ variable "allow_force_destroy" {
   description = "Allows full cleanup of resources by disabling any deletion safe guards"
 }
 
+variable "gitlab_values_template" {
+  type        = string
+  description = "Gitlab Helm chart configuration values"
+}

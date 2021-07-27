@@ -16,37 +16,25 @@
 
 provider "google" {
   project = var.project_id
+  region  = var.region
 }
 
 provider "google-beta" {
   project = var.project_id
+  region  = var.region
 }
-
-locals {
-  gitlab_db_name = var.gitlab_db_random_prefix ? "${var.gitlab_db_name}-${random_id.suffix[0].hex}" : var.gitlab_db_name
-}
-
-resource "random_id" "suffix" {
-  count = var.gitlab_db_random_prefix ? 1 : 0
-
-  byte_length = 4
-}
-
 
 module "gke_auth" {
   source  = "terraform-google-modules/kubernetes-engine/google//modules/auth"
   version = "~> 10.0"
 
   project_id   = module.project_services.project_id
-  cluster_name = module.gke.name
-  location     = module.gke.location
-
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
+  cluster_name = var.gke_private ? module.gke_private["gke"].name : module.gke_public["gke"].name
+  location     = var.gke_private ? module.gke_private["gke"].location : module.gke_public["gke"].location
 }
 
 provider "helm" {
   kubernetes {
-    load_config_file       = false
     cluster_ca_certificate = module.gke_auth.cluster_ca_certificate
     host                   = module.gke_auth.host
     token                  = module.gke_auth.token
@@ -54,8 +42,6 @@ provider "helm" {
 }
 
 provider "kubernetes" {
-  load_config_file = false
-
   cluster_ca_certificate = module.gke_auth.cluster_ca_certificate
   host                   = module.gke_auth.host
   token                  = module.gke_auth.token
@@ -64,7 +50,7 @@ provider "kubernetes" {
 // Services
 module "project_services" {
   source  = "terraform-google-modules/project-factory/google//modules/project_services"
-  version = "~> 9.0"
+  version = "~> 11.0"
 
   project_id                  = var.project_id
   disable_services_on_destroy = false
@@ -76,23 +62,6 @@ module "project_services" {
     "cloudresourcemanager.googleapis.com",
     "redis.googleapis.com"
   ]
-}
-
-// GCS Service Account
-resource "google_service_account" "gitlab_gcs" {
-  project      = var.project_id
-  account_id   = "gitlab-gcs"
-  display_name = "GitLab Cloud Storage"
-}
-
-resource "google_service_account_key" "gitlab_gcs" {
-  service_account_id = google_service_account.gitlab_gcs.name
-}
-
-resource "google_project_iam_member" "project" {
-  project = var.project_id
-  role    = "roles/storage.admin"
-  member  = "serviceAccount:${google_service_account.gitlab_gcs.email}"
 }
 
 // Networking
@@ -108,6 +77,8 @@ resource "google_compute_subnetwork" "subnetwork" {
   region        = var.region
   network       = google_compute_network.gitlab.self_link
 
+  private_ip_google_access = true
+
   secondary_ip_range {
     range_name    = "gitlab-cluster-pod-cidr"
     ip_cidr_range = var.gitlab_pods_subnet_cidr
@@ -119,143 +90,47 @@ resource "google_compute_subnetwork" "subnetwork" {
   }
 }
 
-resource "google_compute_address" "gitlab" {
-  name         = "gitlab"
-  region       = var.region
-  address_type = "EXTERNAL"
-  description  = "Gitlab Ingress IP"
-  depends_on   = [module.project_services.project_id]
-  count        = var.gitlab_address_name == "" ? 1 : 0
-}
+resource "google_compute_subnetwork" "proxy_only_subnetwork" {
+  count    = var.use_gclb ? 1 : 0
+  provider = google-beta
 
-// Database
-resource "google_compute_global_address" "gitlab_sql" {
-  provider      = google-beta
-  project       = var.project_id
-  name          = "gitlab-sql"
-  purpose       = "VPC_PEERING"
-  address_type  = "INTERNAL"
+  name          = "gitlab-proxy-only"
+  ip_cidr_range = var.gitlab_proxy_only_subnet_cidr
+  region        = var.region
   network       = google_compute_network.gitlab.self_link
-  address       = "10.1.0.0"
-  prefix_length = 16
+
+  purpose = "INTERNAL_HTTPS_LOAD_BALANCER"
+  role    = "ACTIVE"
 }
 
-resource "google_service_networking_connection" "private_vpc_connection" {
-  provider                = google-beta
-  network                 = google_compute_network.gitlab.self_link
-  service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = [google_compute_global_address.gitlab_sql.name]
-  depends_on              = [module.project_services.project_id]
+// GKE Service Account
+resource "google_service_account" "gitlab_gke" {
+  account_id   = "gitlab-gke"
+  display_name = "Gitlab GKE Service Account"
 }
 
-resource "google_sql_database_instance" "gitlab_db" {
-  depends_on       = [google_service_networking_connection.private_vpc_connection]
-  name             = local.gitlab_db_name
-  region           = var.region
-  database_version = "POSTGRES_11"
+resource "google_project_iam_member" "gitlab_gke_permissions" {
+  for_each = toset(["roles/logging.logWriter", "roles/monitoring.metricWriter", "roles/monitoring.viewer"])
 
-  settings {
-    tier            = "db-custom-4-15360"
-    disk_autoresize = true
-
-    ip_configuration {
-      ipv4_enabled    = "false"
-      private_network = google_compute_network.gitlab.self_link
-    }
-  }
+  project = var.project_id
+  role    = each.value
+  member  = format("serviceAccount:%s", google_service_account.gitlab_gke.email)
 }
 
-resource "google_sql_database" "gitlabhq_production" {
-  name       = "gitlabhq_production"
-  instance   = google_sql_database_instance.gitlab_db.name
-  depends_on = [google_sql_user.gitlab]
-}
+// GKE Cluster (private)
+module "gke_private" {
+  for_each = var.gke_private ? toset(["gke"]) : toset([])
 
-resource "random_string" "autogenerated_gitlab_db_password" {
-  length  = 16
-  special = false
-}
-
-resource "google_sql_user" "gitlab" {
-  name     = "gitlab"
-  instance = google_sql_database_instance.gitlab_db.name
-
-  password = var.gitlab_db_password != "" ? var.gitlab_db_password : random_string.autogenerated_gitlab_db_password.result
-}
-
-// Redis
-resource "google_redis_instance" "gitlab" {
-  name               = "gitlab"
-  tier               = "STANDARD_HA"
-  memory_size_gb     = 5
-  region             = var.region
-  authorized_network = google_compute_network.gitlab.self_link
-
-  depends_on = [module.project_services.project_id]
-
-  display_name = "GitLab Redis"
-}
-
-// Cloud Storage
-resource "google_storage_bucket" "gitlab-backups" {
-  name          = "${var.project_id}-gitlab-backups"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-uploads" {
-  name          = "${var.project_id}-gitlab-uploads"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-artifacts" {
-  name          = "${var.project_id}-gitlab-artifacts"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "git-lfs" {
-  name          = "${var.project_id}-git-lfs"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-packages" {
-  name          = "${var.project_id}-gitlab-packages"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-registry" {
-  name          = "${var.project_id}-registry"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-pseudo" {
-  name          = "${var.project_id}-pseudo"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-
-resource "google_storage_bucket" "gitlab-runner-cache" {
-  name          = "${var.project_id}-runner-cache"
-  location      = var.region
-  force_destroy = var.allow_force_destroy
-}
-// GKE Cluster
-module "gke" {
-  source  = "terraform-google-modules/kubernetes-engine/google"
-  version = "~> 12.0"
+  source  = "terraform-google-modules/kubernetes-engine/google//modules/private-cluster"
+  version = "~> 16.0"
 
   # Create an implicit dependency on service activation
   project_id = module.project_services.project_id
 
-  name               = "gitlab"
-  region             = var.region
-  regional           = true
-  kubernetes_version = var.gke_version
+  name            = "gitlab"
+  region          = var.region
+  regional        = true
+  release_channel = var.gke_release_channel
 
   remove_default_node_pool = true
   initial_node_count       = 1
@@ -265,147 +140,161 @@ module "gke" {
   ip_range_pods     = "gitlab-cluster-pod-cidr"
   ip_range_services = "gitlab-cluster-service-cidr"
 
-  issue_client_certificate = true
+  enable_shielded_nodes  = true
+  enable_private_nodes   = true
+  master_ipv4_cidr_block = var.gitlab_master_subnet_cidr
 
   node_pools = [
     {
-      name         = "gitlab"
-      autoscaling  = false
+      name            = "gitlab"
+      service_account = google_service_account.gitlab_gke.email
+
+      autoscaling    = var.gke_autoscale_max > 0 ? true : false
+      min_node_count = var.gke_autoscale_min
+      max_node_count = var.gke_autoscale_max
+
+      preemptible  = var.gke_preemptible_nodes
       machine_type = var.gke_machine_type
-      node_count   = 1
+
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
+
+      node_count = var.gke_autoscale_min
     },
   ]
+
+  identity_namespace = var.use_gclb || var.gke_workload_identity ? "enabled" : null
+  node_metadata      = var.use_gclb || var.gke_workload_identity ? "GKE_METADATA_SERVER" : "SECURE"
+
+  node_pools_tags = {
+    all = ["gitlab"]
+  }
 
   node_pools_oauth_scopes = {
     all = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 }
 
-resource "kubernetes_storage_class" "pd-ssd" {
-  metadata {
-    name = "pd-ssd"
-  }
+// GKE Cluster (public)
+module "gke_public" {
+  for_each = !var.gke_private ? toset(["gke"]) : toset([])
 
-  storage_provisioner = "kubernetes.io/gce-pd"
+  source  = "terraform-google-modules/kubernetes-engine/google"
+  version = "~> 16.0"
 
-  parameters = {
-    type = "pd-ssd"
-  }
+  # Create an implicit dependency on service activation
+  project_id = module.project_services.project_id
 
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
-}
+  name            = "gitlab"
+  region          = var.region
+  regional        = true
+  release_channel = var.gke_release_channel
 
-resource "kubernetes_secret" "gitlab_pg" {
-  metadata {
-    name = "gitlab-pg"
-  }
+  remove_default_node_pool = true
+  initial_node_count       = 1
 
-  data = {
-    password = var.gitlab_db_password != "" ? var.gitlab_db_password : random_string.autogenerated_gitlab_db_password.result
-  }
+  network           = google_compute_network.gitlab.name
+  subnetwork        = google_compute_subnetwork.subnetwork.name
+  ip_range_pods     = "gitlab-cluster-pod-cidr"
+  ip_range_services = "gitlab-cluster-service-cidr"
 
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
-}
+  enable_shielded_nodes = true
 
-resource "kubernetes_secret" "gitlab_rails_storage" {
-  metadata {
-    name = "gitlab-rails-storage"
-  }
+  node_pools = [
+    {
+      name            = "gitlab"
+      service_account = google_service_account.gitlab_gke.email
 
-  data = {
-    connection = <<EOT
-provider: Google
-google_project: ${var.project_id}
-google_client_email: ${google_service_account.gitlab_gcs.email}
-google_json_key_string: '${base64decode(google_service_account_key.gitlab_gcs.private_key)}'
-EOT
-  }
+      autoscaling    = var.gke_autoscale_max > 0 ? true : false
+      min_node_count = var.gke_autoscale_min
+      max_node_count = var.gke_autoscale_max
 
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
-}
+      preemptible  = var.gke_preemptible_nodes
+      machine_type = var.gke_machine_type
 
-resource "kubernetes_secret" "gitlab_registry_storage" {
-  metadata {
-    name = "gitlab-registry-storage"
-  }
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
 
-  data = {
-    "gcs.json" = <<EOT
-${base64decode(google_service_account_key.gitlab_gcs.private_key)}
-EOT
-    storage    = <<EOT
-gcs:
-  bucket: ${var.project_id}-registry
-  keyfile: /etc/docker/registry/storage/gcs.json
-EOT
-  }
-
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
-}
-
-
-resource "kubernetes_secret" "gitlab_gcs_credentials" {
-  metadata {
-    name = "google-application-credentials"
-  }
-
-  data = {
-    gcs-application-credentials-file = base64decode(google_service_account_key.gitlab_gcs.private_key)
-  }
-
-  depends_on = [time_sleep.sleep_for_cluster_fix_helm_6361]
-}
-
-data "google_compute_address" "gitlab" {
-  name   = var.gitlab_address_name
-  region = var.region
-
-  # Do not get data if the address is being created as part of the run
-  count = var.gitlab_address_name == "" ? 0 : 1
-}
-
-locals {
-  gitlab_address = var.gitlab_address_name == "" ? google_compute_address.gitlab.0.address : data.google_compute_address.gitlab.0.address
-  domain         = var.domain != "" ? var.domain : "${local.gitlab_address}.xip.io"
-}
-
-data "template_file" "helm_values" {
-  template = "${file("${path.module}/values.yaml.tpl")}"
-
-  vars = {
-    DOMAIN                = local.domain
-    INGRESS_IP            = local.gitlab_address
-    DB_PRIVATE_IP         = google_sql_database_instance.gitlab_db.private_ip_address
-    REDIS_PRIVATE_IP      = google_redis_instance.gitlab.host
-    PROJECT_ID            = var.project_id
-    CERT_MANAGER_EMAIL    = var.certmanager_email
-    GITLAB_RUNNER_INSTALL = var.gitlab_runner_install
-  }
-}
-
-resource "time_sleep" "sleep_for_cluster_fix_helm_6361" {
-  create_duration  = "180s"
-  destroy_duration = "180s"
-  depends_on       = [module.gke.endpoint, google_sql_database.gitlabhq_production]
-}
-
-resource "helm_release" "gitlab" {
-  name       = "gitlab"
-  repository = "https://charts.gitlab.io"
-  chart      = "gitlab"
-  version    = var.helm_chart_version
-  timeout    = 1200
-
-  values = [data.template_file.helm_values.rendered]
-
-  depends_on = [
-    google_redis_instance.gitlab,
-    google_sql_user.gitlab,
-    kubernetes_storage_class.pd-ssd,
-    kubernetes_secret.gitlab_pg,
-    kubernetes_secret.gitlab_rails_storage,
-    kubernetes_secret.gitlab_registry_storage,
-    kubernetes_secret.gitlab_gcs_credentials,
-    time_sleep.sleep_for_cluster_fix_helm_6361,
+      node_count = var.gke_autoscale_min
+    },
   ]
+
+  identity_namespace = var.use_gclb || var.gke_workload_identity ? "enabled" : null
+  node_metadata      = var.use_gclb || var.gke_workload_identity ? "GKE_METADATA_SERVER" : "SECURE"
+
+  node_pools_tags = {
+    all = ["gitlab"]
+  }
+
+  node_pools_oauth_scopes = {
+    all = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+}
+
+# GKE Autoneg setup
+module "autoneg" {
+  count = var.use_gclb ? 1 : 0
+
+  source = "./modules/autoneg"
+
+  project_id = var.project_id
+}
+
+# Cloud Router & NAT for private nodes
+resource "google_compute_router" "router" {
+  count = var.gke_private ? 1 : 0
+
+  name    = "gitlab-router"
+  region  = var.region
+  network = google_compute_network.gitlab.id
+
+  bgp {
+    asn = 64514
+  }
+}
+
+resource "google_compute_router_nat" "nat" {
+  count = var.gke_private ? 1 : 0
+
+  name                               = "gitlab-nat"
+  router                             = google_compute_router.router[0].name
+  region                             = google_compute_router.router[0].region
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+}
+
+// Gitlab
+module "gitlab" {
+  source = "./modules/gitlab"
+
+  project_id = module.project_services.project_id
+
+  region            = var.region
+  domain            = var.domain
+  certmanager_email = var.certmanager_email
+
+  network    = google_compute_network.gitlab.name
+  subnetwork = google_compute_subnetwork.subnetwork.name
+
+  gitlab_db_name          = var.gitlab_db_name
+  gitlab_db_random_prefix = var.gitlab_db_random_prefix
+  gitlab_db_password      = var.gitlab_db_password
+
+  gitlab_address_name           = var.gitlab_address_name
+  gitlab_runner_install         = var.gitlab_runner_install
+  gitlab_values_template        = "${path.module}/values.yaml.tpl"
+  gitlab_proxy_only_subnet_cidr = var.gitlab_proxy_only_subnet_cidr
+
+  use_gclb     = var.use_gclb
+  gclb_logging = var.gclb_logging
+
+  gcs_uniform_access = var.gcs_uniform_access
+
+  helm_chart_version  = var.helm_chart_version
+  allow_force_destroy = var.allow_force_destroy
 }

@@ -15,26 +15,27 @@
  */
 
 output "gitlab_address" {
-  value       = local.gitlab_address
+  value       = module.gitlab.gitlab_address
   description = "IP address where you can connect to your GitLab instance"
 }
 
 output "gitlab_url" {
-  value       = "https://gitlab.${local.domain}"
+  value       = module.gitlab.gitlab_url
   description = "URL where you can access your GitLab instance"
 }
 
 output "cluster_name" {
-  value       = module.gke.name
+  value       = var.gke_private ? module.gke_private["gke"].name : module.gke_public["gke"].name
   description = "Name of the GKE cluster that GitLab is deployed in."
 }
 
 output "cluster_location" {
-  value       = module.gke.location
+  value       = var.gke_private ? module.gke_private["gke"].location : module.gke_public["gke"].location
   description = "Location of the GKE cluster that GitLab is deployed in."
 }
 
 output "cluster_ca_certificate" {
+  sensitive   = true
   value       = module.gke_auth.cluster_ca_certificate
   description = "CA Certificate for the GKE cluster that GitLab is deployed in."
 }
@@ -45,18 +46,11 @@ output "host" {
 }
 
 output "token" {
+  sensitive   = true
   value       = module.gke_auth.token
   description = "Token for the GKE cluster that GitLab is deployed in."
 }
 
 output "root_password_instructions" {
-  value = <<EOF
-
-  Run the following commands to get the root user password:
-
-  gcloud container clusters get-credentials gitlab --zone ${var.region} --project ${var.project_id}
-  kubectl get secret gitlab-gitlab-initial-root-password -o go-template='{{ .data.password }}' | base64 -d && echo
-  EOF
-
-  description = "Instructions for getting the root user's password for initial setup"
+  value = module.gitlab.root_password_instructions
 }

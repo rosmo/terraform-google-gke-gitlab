@@ -1,0 +1,325 @@
+/**
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+resource "google_service_account" "autoneg" {
+  project      = var.project_id
+  account_id   = "gitlab-autoneg"
+  display_name = "GitLab Autoneg service account"
+}
+
+resource "google_project_iam_custom_role" "autoneg_role" {
+  role_id     = "autoneg"
+  title       = "Autoneg role"
+  description = "Autoneg role"
+  permissions = ["compute.backendServices.get", "compute.backendServices.update", "compute.regionBackendServices.get", "compute.regionBackendServices.update", "compute.networkEndpointGroups.use", "compute.healthChecks.useReadOnly", "compute.regionHealthChecks.useReadOnly"]
+}
+
+data "google_iam_policy" "autoneg_iam_policy" {
+  binding {
+    role = "roles/iam.workloadIdentityUser"
+
+    members = [
+      format("serviceAccount:%s.svc.id.goog[autoneg-system/autoneg]", var.project_id)
+    ]
+  }
+}
+
+resource "google_service_account_iam_policy" "autoneg_sa_iam" {
+  service_account_id = google_service_account.autoneg.name
+  policy_data        = data.google_iam_policy.autoneg_iam_policy.policy_data
+}
+
+resource "google_project_iam_member" "autoneg_iam" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.autoneg_role.id
+  member  = format("serviceAccount:%s", google_service_account.autoneg.email)
+}
+
+resource "kubernetes_namespace" "namespace_autoneg_system" {
+  metadata {
+    labels = {
+      app           = "autoneg"
+      control-plane = "controller-manager"
+    }
+
+    name = "autoneg-system"
+  }
+}
+
+resource "kubernetes_service_account" "service_account" {
+  metadata {
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+    name      = "autoneg"
+    labels = {
+      app = "autoneg"
+    }
+
+    annotations = {
+      "iam.gke.io/gcp-service-account" = google_service_account.autoneg.email
+    }
+  }
+}
+
+resource "kubernetes_role" "role_autoneg_leader_election_role" {
+  metadata {
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+    name      = "autoneg-leader-election-role"
+    labels = {
+      app = "autoneg"
+    }
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["configmaps"]
+    verbs      = ["get", "list", "watch", "create", "update", "patch", "delete"]
+  }
+  rule {
+    api_groups = [""]
+    resources  = ["configmaps/status"]
+    verbs      = ["get", "update", "patch"]
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["events"]
+    verbs      = ["create"]
+  }
+}
+
+resource "kubernetes_cluster_role" "clusterrole_autoneg_manager_role" {
+  metadata {
+    name = "autoneg-manager-role"
+
+    labels = {
+      app = "autoneg"
+    }
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["events"]
+    verbs      = ["create", "patch"]
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["services"]
+    verbs      = ["get", "list", "patch", "update", "watch"]
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["services/status"]
+    verbs      = ["get", "patch", "update"]
+  }
+}
+
+resource "kubernetes_cluster_role" "clusterrole_autoneg_proxy_role" {
+  metadata {
+    name = "autoneg-proxy-role"
+
+    labels = {
+      app = "autoneg"
+    }
+    annotations = {}
+  }
+
+  rule {
+    api_groups = ["authentication.k8s.io"]
+    resources  = ["tokenreviews"]
+    verbs      = ["create"]
+  }
+
+  rule {
+    api_groups = ["authorization.k8s.io"]
+    resources  = ["subjectaccessreviews"]
+    verbs      = ["create"]
+  }
+}
+
+resource "kubernetes_role_binding" "rolebinding_autoneg_leader_election_rolebinding" {
+  metadata {
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+    name      = "autoneg-leader-election-rolebinding"
+
+    labels = {
+      app = "autoneg"
+    }
+    annotations = {}
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "Role"
+    name      = kubernetes_role.role_autoneg_leader_election_role.metadata[0].name
+  }
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account.service_account.metadata[0].name
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+  }
+}
+
+resource "kubernetes_cluster_role_binding" "clusterrolebinding_autoneg_manager_rolebinding" {
+  metadata {
+    name = "autoneg-manager-rolebinding"
+    labels = {
+      app = "autoneg"
+    }
+    annotations = {}
+  }
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role.clusterrole_autoneg_manager_role.metadata[0].name
+  }
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account.service_account.metadata[0].name
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+  }
+}
+
+resource "kubernetes_cluster_role_binding" "clusterrolebinding_autoneg_proxy_rolebinding" {
+  metadata {
+    name = "autoneg-proxy-rolebinding"
+    labels = {
+      app = "autoneg"
+    }
+    annotations = {}
+  }
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "ClusterRole"
+    name      = kubernetes_cluster_role.clusterrole_autoneg_proxy_role.metadata[0].name
+  }
+  subject {
+    kind      = "ServiceAccount"
+    name      = kubernetes_service_account.service_account.metadata[0].name
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+  }
+}
+
+resource "kubernetes_service" "service_autoneg_controller_manager_metrics_service" {
+  metadata {
+    annotations = {
+      "prometheus.io/port"   = "8443"
+      "prometheus.io/scheme" = "https"
+      "prometheus.io/scrape" = "true"
+      "cloud.google.com"     = "'{\"ingress\":true}'"
+    }
+    labels = {
+      "app"           = "autoneg"
+      "control-plane" = "controller-manager"
+    }
+    name      = "autoneg-controller-manager-metrics-service"
+    namespace = "autoneg-system"
+  }
+  spec {
+    port {
+      name        = "https"
+      port        = 8443
+      target_port = "https"
+      protocol    = "TCP"
+    }
+    selector = {
+      app           = "autoneg"
+      control-plane = "controller-manager"
+    }
+  }
+  depends_on = [kubernetes_namespace.namespace_autoneg_system]
+}
+
+resource "kubernetes_deployment" "deployment_autoneg_controller_manager" {
+  metadata {
+    namespace = kubernetes_namespace.namespace_autoneg_system.metadata[0].name
+    name      = "autoneg-controller-manager"
+    labels = {
+      "app"           = "autoneg"
+      "control-plane" = "controller-manager"
+    }
+    annotations = {}
+  }
+
+  spec {
+    replicas = 1
+    selector {
+      match_labels = {
+        app           = "autoneg"
+        control-plane = "controller-manager"
+      }
+    }
+
+
+    template {
+      metadata {
+        labels = {
+          app           = "autoneg"
+          control-plane = "controller-manager"
+        }
+        annotations = {}
+      }
+
+      spec {
+        service_account_name             = kubernetes_service_account.service_account.metadata[0].name
+        termination_grace_period_seconds = 10
+
+        container {
+          name = "manager"
+
+          image             = var.controller_image
+          image_pull_policy = var.image_pull_policy
+
+          args    = ["--metrics-addr=127.0.0.1:8080", "--enable-leader-election"]
+          command = ["/manager"]
+
+          resources {
+            limits = {
+              cpu    = "100m"
+              memory = "30Mi"
+            }
+            requests = {
+              cpu    = "100m"
+              memory = "20Mi"
+            }
+          }
+        }
+
+        container {
+          name = "kube-rbac-proxy"
+
+          image             = var.kube_rbac_proxy_image
+          image_pull_policy = var.image_pull_policy
+
+          args = ["--secure-listen-address=0.0.0.0:8443", "--upstream=http://127.0.0.1:8080/", "--logtostderr=true", "--v=10"]
+
+          port {
+            container_port = 8443
+            name           = "https"
+            protocol       = "TCP"
+          }
+        }
+      }
+    }
+  }
+  depends_on = [
+    kubernetes_role_binding.rolebinding_autoneg_leader_election_rolebinding,
+    kubernetes_cluster_role_binding.clusterrolebinding_autoneg_manager_rolebinding,
+    kubernetes_cluster_role_binding.clusterrolebinding_autoneg_proxy_rolebinding,
+  ]
+}
+
