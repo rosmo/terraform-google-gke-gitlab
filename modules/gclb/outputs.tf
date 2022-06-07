@@ -43,5 +43,5 @@ output "internal_ip" {
 }
 
 output "shell_ip" {
-  value = google_compute_global_address.ssh_address.address
+  value = var.gitlab_address
 }

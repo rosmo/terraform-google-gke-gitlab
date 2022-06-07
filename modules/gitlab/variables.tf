@@ -33,10 +33,6 @@ variable "domain" {
   default     = ""
 }
 
-variable "certmanager_email" {
-  description = "Email used to retrieve SSL certificates from [Let's Encrypt](https://letsencrypt.org)"
-}
-
 variable "gitlab_db_name" {
   description = "Instance name for the GitLab Postgres database."
   default     = "gitlab-db"

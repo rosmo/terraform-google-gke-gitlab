@@ -76,9 +76,6 @@ global:
         secret: gitlab-rails-storage
         key: connection
 
-certmanager-issuer:
-  email: ${CERT_MANAGER_EMAIL}
-
 %{ if USE_GCLB }
 certmanager:
   install: false
@@ -98,7 +95,7 @@ gitlab:
     persistence:
       size: 200Gi
       storageClass: "pd-ssd"
-  task-runner:
+  toolbox:
     backups:
       objectStorage:
         backend: gcs

@@ -306,10 +306,9 @@ data "template_file" "helm_values" {
     DB_PRIVATE_IP              = google_sql_database_instance.gitlab_db.private_ip_address
     REDIS_PRIVATE_IP           = google_redis_instance.gitlab.host
     PROJECT_ID                 = var.project_id
-    CERT_MANAGER_EMAIL         = var.certmanager_email
     GITLAB_RUNNER_INSTALL      = var.gitlab_runner_install
     USE_GCLB                   = var.use_gclb
-    SSH_HOST                   = var.use_gclb ? format("ssh.gitlab.%s", local.domain) : local.domain
+    SSH_HOST                   = var.use_gclb ? format("gitlab.%s", local.domain) : local.domain
     BACKEND                    = var.use_gclb ? module.gclb[0].webservice_backend : ""
     WORKHORSE_BACKEND          = var.use_gclb ? module.gclb[0].workhorse_backend : ""
     REGISTRY_BACKEND           = var.use_gclb ? module.gclb[0].registry_backend : ""

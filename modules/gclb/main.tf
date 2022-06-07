@@ -321,11 +321,6 @@ resource "google_compute_forwarding_rule" "internal_forwarding_rule" {
   subnetwork = var.subnetwork
 }
 
-resource "google_compute_global_address" "ssh_address" {
-  name         = "gitlab-ssh"
-  address_type = "EXTERNAL"
-}
-
 resource "google_compute_target_tcp_proxy" "ssh_target_proxy" {
   name            = "gitlab-ssh-tcp-proxy"
   backend_service = google_compute_backend_service.gitlab_ssh_backend.id
@@ -334,6 +329,6 @@ resource "google_compute_target_tcp_proxy" "ssh_target_proxy" {
 resource "google_compute_global_forwarding_rule" "ssh_forwarding_rule" {
   name       = "gitlab-ssh-fr"
   target     = google_compute_target_tcp_proxy.ssh_target_proxy.id
-  ip_address = google_compute_global_address.ssh_address.address
+  ip_address = var.gitlab_address
   port_range = "5222"
 }

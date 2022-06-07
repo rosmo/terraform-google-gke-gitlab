@@ -23,10 +23,6 @@ variable "domain" {
   default     = ""
 }
 
-variable "certmanager_email" {
-  description = "Email used to retrieve SSL certificates from [Let's Encrypt](https://letsencrypt.org)"
-}
-
 variable "gke_release_channel" {
   description = "Kubernetes releases updates often, to deliver security updates, fix known issues, and introduce new features. [Release channels](https://cloud.google.com/kubernetes-engine/docs/concepts/release-channels) offer customers the ability to balance between stability and the feature set of the version deployed in the cluster."
   default     = "REGULAR"
@@ -34,7 +30,7 @@ variable "gke_release_channel" {
 
 variable "gke_machine_type" {
   description = "[Machine type](https://cloud.google.com/compute/docs/machine-types) used for the node-pool"
-  default     = "n1-standard-4"
+  default     = "e2-standard-4"
 }
 
 variable "gke_preemptible_nodes" {
@@ -151,7 +147,7 @@ variable "gcs_uniform_access" {
 
 variable "helm_chart_version" {
   type        = string
-  default     = "5.1.0"
+  default     = "6.0.1"
   description = "Helm chart version to install during deployment ([GitLab version mapping](https://docs.gitlab.com/charts/installation/version_mappings.html))"
 }
 

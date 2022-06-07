@@ -88,6 +88,12 @@ resource "google_compute_subnetwork" "subnetwork" {
     range_name    = "gitlab-cluster-service-cidr"
     ip_cidr_range = var.gitlab_services_subnet_cidr
   }
+
+  lifecycle {
+    ignore_changes = [
+      secondary_ip_range
+    ]
+  }
 }
 
 resource "google_compute_subnetwork" "proxy_only_subnetwork" {
@@ -233,10 +239,8 @@ module "gke_public" {
 
 # GKE Autoneg setup
 module "autoneg" {
-  count = var.use_gclb ? 1 : 0
-
-  source = "./modules/autoneg"
-
+  count      = var.use_gclb ? 1 : 0
+  source     = "github.com/GoogleCloudPlatform/gke-autoneg-controller//terraform/autoneg"
   project_id = var.project_id
 }
 
@@ -274,9 +278,8 @@ module "gitlab" {
 
   project_id = module.project_services.project_id
 
-  region            = var.region
-  domain            = var.domain
-  certmanager_email = var.certmanager_email
+  region = var.region
+  domain = var.domain
 
   network    = google_compute_network.gitlab.name
   subnetwork = google_compute_subnetwork.subnetwork.name
